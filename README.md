@@ -167,6 +167,7 @@ ohpm install
 ### 使用限制
 
 - 真机需开启系统「位置信息」总开关；开关关闭时定位请求报 3301100，映射为 `onWarning`（type 500）
+- `onWarning` 为库内部订阅的告警通道（经 `console.warn` 输出，业务无需自行监听），type 取值：401 参数错误 / 403 无权限 / 500 定位服务异常（含系统定位总开关关闭）/ 502 航向传感器不可用
 - 鸿蒙 GNSS 定位最小时间间隔 1 秒、网络定位最小 20 秒，`interval` 低于最小值时按系统最小值生效；`fastestInterval`/`maxWaitTime` 为 Android 调度语义，鸿蒙无对应机制、静默忽略
 - **后台定位申请顺序**（鸿蒙限制）：`LOCATION_IN_BACKGROUND` 不能与前台定位权限合并到同一次申请——适配层采用两步串行：先申请前台组合（LOCATION + APPROXIMATELY_LOCATION），授权成功后再单独发起后台权限申请（该调用在鸿蒙不弹窗、不授予，仅探测后台授权状态）；运行时弹窗仅有「本次使用允许/仅使用期间允许/不允许」三个选项，**「始终允许」只能由用户在系统设置中手动开启**（后台定位的唯一授予路径，代码无法授予）
 - **验证后台权限是否已授予**：`getCurrentPermission()` 返回 `authorizedAlways` 即含后台；也可用命令 `hdc shell atm dump -t -b <bundleName>` 查看 `LOCATION_IN_BACKGROUND` 的 `grantStatus`（0=已授予，-1=未授予）
@@ -244,7 +245,7 @@ const status = await RNLocation.getCurrentPermission();          // 'authorizedF
 const ok = await RNLocation.checkPermission({ ios: 'always' }); // 校验权限档位
 
 const unsubscribe = RNLocation.subscribeToPermissionUpdates((status) => {
-  console.log('permission changed:', status); // authorizationStatusDidChange 事件
+  console.log('permission changed:', status); // 权限状态变化时触发
 });
 // unsubscribe() 取消订阅
 ```
@@ -272,6 +273,8 @@ const unsubSig = RNLocation.subscribeToSignificantLocationUpdates((locations) =>
 
 > [!TIP] "HarmonyOS平台支持"列为 Yes 表示 HarmonyOS平台支持该属性；No 则表示不支持（静默忽略或不产出）；partially 表示部分支持。使用方法跨平台一致，效果对标 iOS 或 Android 的效果。
 
+> [!TIP] "HarmonyOS平台支持"为 No / partially 的项，具体差异与原因统一在下方「遗留问题」章节说明。
+
 ### API
 | 名称 | 类型 | 参数类型 | 返回值 | 必填 | 平台 | HarmonyOS平台支持 | 描述 |
 |--------|---------|-----|-------|-------|--------|-----|-----------------|
@@ -286,14 +289,6 @@ const unsubSig = RNLocation.subscribeToSignificantLocationUpdates((locations) =>
 | subscribeToSignificantLocationUpdates | function | listener: (locations: Location[]) => void | Subscription | No | iOS | partially | 订阅显著位置变化。鸿蒙端为低功耗近似实现，粒度粗于 iOS，不受 configure 的 distanceFilter 影响 |
 
 > 返回值 `Subscription` 为退订函数 `() => void`，调用即解除订阅并释放原生资源。
-
-### 事件
-| 名称 | 负载类型 | 平台 | HarmonyOS平台支持 | 描述 |
-|---|---|---|---|---|
-| locationUpdated | Location[] | iOS, Android | Yes | 位置更新事件，负载为位置数组 |
-| headingUpdated | { heading: number } | iOS | Yes | 航向更新事件 |
-| authorizationStatusDidChange | LocationPermissionStatus | iOS | Yes | 权限状态变化事件 |
-| onWarning | { message: string, type: string } | iOS, Android | Yes | 原生告警事件。type 取值：401 参数错误 / 403 无权限 / 500 定位服务异常（含系统定位总开关关闭）/ 502 航向传感器不可用 |
 
 ---
 
@@ -368,7 +363,18 @@ const unsubSig = RNLocation.subscribeToSignificantLocationUpdates((locations) =>
 | notDetermined | iOS | No | 鸿蒙无法区分该状态（与 denied 合并），不返回 |
 
 ## 遗留问题
+
+以下汇总「接口说明」中 HarmonyOS 平台支持为 No / partially 的项及原因（多为鸿蒙系统能力与 iOS/Android 机制差异所致，非缺陷）：
+
 1. `AndroidProvider` 类型取值与官方 npm 2.5.0 包（`"auto" | "fused" | "builtin"`）存在命名差异（本包为 `"auto" | "playServices" | "standard"`，取自原库 GitHub master 分支命名）。该配置仅 Android 平台使用且鸿蒙端运行时忽略，不影响功能；如业务代码按官方 npm 2.5.0 类型传 `fused`/`builtin`，TS 编译会报错，属已知类型层差异。
+2. **权限状态粒度受限**（`getCurrentPermission` / `LocationPermissionStatus` 为 partially / No 的原因）：鸿蒙权限层无法区分「从未申请」「用户拒绝」「待定」三种状态，未授权时统一返回 `denied`；`notDetermined`、`authorizedWhenInUse` 两个取值在鸿蒙端不会返回。
+3. **`requestPermission` 行为差异**（partially 的原因）：`always` 档中的后台定位权限（`LOCATION_IN_BACKGROUND`）按鸿蒙限制无法经代码授予，仅能由用户在系统设置中手动开启；代码申请时不弹窗、不授予，用户未开启时返回 `false` 属预期（详见「使用限制」）。`android.rationale` 弹窗文案参数在鸿蒙端静默忽略。
+4. **权限变更订阅时机不同**（`subscribeToPermissionUpdates` 为 partially 的原因）：原库 iOS 为系统授权状态变化时回调；鸿蒙无系统级变更通知，仅在每次调用权限查询/申请接口后触发一次。
+5. **部分 ConfigureOptions 配置静默忽略**（No 项）：`fastestInterval`、`maxWaitTime`（Android 调度/攒批语义，鸿蒙 `timeInterval` 单槽位，仅 `interval` 生效）、`desiredAccuracy.ios`（iOS 精度档）、`activityType`、`androidProvider`、`allowsBackgroundLocationUpdates`（鸿蒙后台定位由 `LOCATION_IN_BACKGROUND` 权限控制）、`pausesLocationUpdatesAutomatically`、`showsBackgroundLocationIndicator`、`headingOrientation` —— 传入后均不报错、不生效。
+6. **`desiredAccuracy.android` 部分档位无对应**（partially 的原因）：仅 `highAccuracy`（→ `ACCURACY`）与 `lowPower`（→ `LOW_POWER`）语义对应；`balancedPowerAccuracy`、`noPower` 为 Android 调度语义，静默忽略（优先级保持不变）；不传时使用系统默认 `FIRST_FIX`。
+7. **Location 负载缺失 2 个字段**（No 项）：`floor`（iOS 室内楼层）、`fromMockProvider`（Android 模拟位置标记）鸿蒙无对应能力，负载中不产出，业务代码不应依赖这两个字段。
+8. **航向为方向传感器近似**（`subscribeToHeadingUpdates` 为 partially 的原因）：鸿蒙以方向传感器 `OrientationResponse.alpha` 近似罗盘航向，无 `trueHeading`/`magneticHeading` 之分（`headingOrientation` 配置不生效，见第 5 条）。
+9. **显著位置变化为近似实现**（`subscribeToSignificantLocationUpdates` 为 partially 的原因）：鸿蒙以低功耗网络定位 + 1000m 距离间隔的独立请求近似实现，粒度粗于 iOS，且不受 configure 的 `distanceFilter` 影响。
 
 ## 其它
 1. 模拟器无方向传感器/无 GNSS：订阅航向会收到 `onWarning`（502）降级不崩溃；定位无结果时 `getLatestLocation` 按超时返回 `null`。定位相关用例请优先在真机验证。
