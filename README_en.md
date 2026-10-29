@@ -167,6 +167,7 @@ The content of this document has been verified with the following versions:
 ### Usage Restrictions
 
 - The system "Location" master switch must be enabled on real devices. When the switch is off, location requests report error 3301100, which is mapped to `onWarning` (type 500)
+- `onWarning` is an internally subscribed warning channel (surfaced via `console.warn`; applications do not need to listen to it). Type values: 401 invalid argument / 403 no permission / 500 location service error (including the system location master switch being off) / 502 heading sensor unavailable
 - On HarmonyOS, the minimum time interval is 1s for GNSS and 20s for network positioning. If `interval` is below the minimum, the system minimum takes effect; `fastestInterval`/`maxWaitTime` are Android scheduling semantics with no HarmonyOS equivalent and are silently ignored
 - **Background permission request order** (HarmonyOS restriction): `LOCATION_IN_BACKGROUND` cannot be combined with foreground location permissions in a single request — the adaptation requests them in two sequential steps: first the foreground set (LOCATION + APPROXIMATELY_LOCATION), then the background permission separately after the foreground grant succeeds. The runtime dialog only offers "Allow this time / Allow while in use / Don't allow" — **"Always allow" can only be enabled manually by the user in system Settings** (the only path to grant background location)
 - **Verifying whether background location is granted**: `getCurrentPermission()` returning `authorizedAlways` means background is granted; alternatively use `hdc shell atm dump -t -b <bundleName>` and check the `grantStatus` of `LOCATION_IN_BACKGROUND` (0=granted, -1=not granted)
@@ -244,7 +245,7 @@ const status = await RNLocation.getCurrentPermission();          // e.g. 'author
 const ok = await RNLocation.checkPermission({ ios: 'always' }); // Check permission tier
 
 const unsubscribe = RNLocation.subscribeToPermissionUpdates((status) => {
-  console.log('permission changed:', status); // authorizationStatusDidChange event
+  console.log('permission changed:', status); // fired when the permission status changes
 });
 // unsubscribe() to cancel
 ```
@@ -273,6 +274,8 @@ const unsubSig = RNLocation.subscribeToSignificantLocationUpdates((locations) =>
 
 > [!TIP] In the "HarmonyOS Support" column, "Yes" means the property is supported on HarmonyOS; "No" means unsupported (silently ignored or not emitted); "Partially" means partially supported. The usage is consistent across platforms, with behavior benchmarked against iOS or Android.
 
+> [!TIP] Items marked "No" / "Partially" in the "HarmonyOS Support" column are explained in detail in the "Known Issues" section below.
+
 ### API
 | Name | Type | Parameter Type | Return Value | Required | Platform | HarmonyOS Support | Description |
 |--------|---------|-----|-------|-------|--------|-----|-----------------|
@@ -287,14 +290,6 @@ const unsubSig = RNLocation.subscribeToSignificantLocationUpdates((locations) =>
 | subscribeToSignificantLocationUpdates | function | listener: (locations: Location[]) => void | Subscription | No | iOS | Partially | Subscribes to significant location changes. Approximated on HarmonyOS with a low-power implementation; coarser granularity than iOS, unaffected by the configured distanceFilter |
 
 > The return value `Subscription` is an unsubscribe function `() => void`; calling it removes the subscription and releases native resources.
-
-### Events
-| Name | Payload | Platform | HarmonyOS Support | Description |
-|---|---|---|---|---|
-| locationUpdated | Location[] | iOS, Android | Yes | Location update event; the payload is an array of locations |
-| headingUpdated | { heading: number } | iOS | Yes | Heading update event |
-| authorizationStatusDidChange | LocationPermissionStatus | iOS | Yes | Permission status change event |
-| onWarning | { message: string, type: string } | iOS, Android | Yes | Native warning event. Type values: 401 invalid argument / 403 no permission / 500 location service error (including the system location master switch being off) / 502 heading sensor unavailable |
 
 ---
 
@@ -369,7 +364,18 @@ const unsubSig = RNLocation.subscribeToSignificantLocationUpdates((locations) =>
 | notDetermined | iOS | No | Cannot be distinguished on HarmonyOS (merged with denied); never returned |
 
 ## Known Issues
+
+The following summarizes the items marked No / Partially in "Available APIs", with the reasons (mostly differences between HarmonyOS capabilities and iOS/Android mechanisms, not defects):
+
 1. The `AndroidProvider` type values differ from the official npm 2.5.0 package (`"auto" | "fused" | "builtin"`); this package uses `"auto" | "playServices" | "standard"` (naming taken from the upstream GitHub master branch). This option is Android-only and ignored at runtime on HarmonyOS, so functionality is unaffected. If business code follows the official npm 2.5.0 types and passes `fused`/`builtin`, a TS compile error occurs — this is a known type-level difference.
+2. **Limited permission status granularity** (why `getCurrentPermission` / `LocationPermissionStatus` are Partially / No): the HarmonyOS permission layer cannot distinguish "never requested", "denied by user", and "undetermined"; unauthorized always returns `denied`. The `notDetermined` and `authorizedWhenInUse` values are never returned on HarmonyOS.
+3. **`requestPermission` behavior differences** (why it is Partially): under the `always` tier, the background location permission (`LOCATION_IN_BACKGROUND`) cannot be granted by code due to HarmonyOS restrictions — it can only be enabled manually by the user in system Settings. The code request neither shows a dialog nor grants anything; returning `false` when the user has not enabled it is expected (see "Usage Restrictions"). The `android.rationale` dialog text is silently ignored on HarmonyOS.
+4. **Different permission-change subscription timing** (why `subscribeToPermissionUpdates` is Partially): the original library on iOS callbacks on system authorization status changes; HarmonyOS has no system-level change notification, so the listener fires once after each permission query/request call.
+5. **Some ConfigureOptions are silently ignored** (No items): `fastestInterval`, `maxWaitTime` (Android scheduling/batching semantics; HarmonyOS `timeInterval` is a single slot, so only `interval` applies), `desiredAccuracy.ios` (iOS accuracy tiers), `activityType`, `androidProvider`, `allowsBackgroundLocationUpdates` (background location on HarmonyOS is controlled by the `LOCATION_IN_BACKGROUND` permission), `pausesLocationUpdatesAutomatically`, `showsBackgroundLocationIndicator`, and `headingOrientation` — none of these take effect, and no error is reported.
+6. **Some `desiredAccuracy.android` tiers have no equivalent** (why it is Partially): only `highAccuracy` (→ `ACCURACY`) and `lowPower` (→ `LOW_POWER`) map semantically; `balancedPowerAccuracy` and `noPower` are Android scheduling semantics and are silently ignored (priority unchanged). The system default `FIRST_FIX` applies when not provided.
+7. **2 fields missing from the Location payload** (No items): `floor` (iOS indoor floor) and `fromMockProvider` (Android mock-location flag) have no HarmonyOS equivalent and are not emitted; business code should not depend on them.
+8. **Heading approximated by the orientation sensor** (why `subscribeToHeadingUpdates` is Partially): HarmonyOS approximates the compass heading with the orientation sensor `OrientationResponse.alpha`; there is no `trueHeading`/`magneticHeading` distinction (`headingOrientation` has no effect, see item 5).
+9. **Significant location changes are approximated** (why `subscribeToSignificantLocationUpdates` is Partially): approximated on HarmonyOS with a low-power network-positioning request using a 1000m distance interval; coarser granularity than iOS and unaffected by the configured `distanceFilter`.
 
 ## Others
 1. Emulators without an orientation sensor/GNSS: subscribing to heading triggers a graceful `onWarning` (502) degradation instead of a crash; when no location can be obtained, `getLatestLocation` returns `null` on timeout. Location-related cases should be verified on real devices first.
